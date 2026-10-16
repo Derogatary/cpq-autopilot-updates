@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CPQ Auto — Projekt-Autopilot
 // @namespace    local.chatgpt.promptqueue
-// @version      3.2.18
-// @description  V3.2.18: Chat-Aktivitaet entprellen und roten Fehlerstatus quittieren.
+// @version      3.2.19
+// @description  V3.2.19: Chat-Aktivitaet entprellen und roten Fehlerstatus quittieren.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-idle
@@ -16,7 +16,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.18-halt-recovery';
+  const VERSION = '3.2.19-keyed-turn-pairing';
   if (document.querySelector('#cpq-v3-host')) return;
 
   const KEY = 'chatgpt-prompt-queue:v3.1auto';
@@ -169,7 +169,7 @@
     </style>
     <button id="launch" class="launch" type="button" data-state="idle" title="CPQ öffnen">CPQ</button>
     <section class="panel" id="panel" aria-label="ChatGPT Prompt Queue">
-      <header><strong>CPQ Auto 3.2.18</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="checkUpdates" class="header-update-check" type="button" title="Nur die veröffentlichte Versionsnummer abfragen; keine automatische Installation.">↻ Update prüfen</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
+      <header><strong>CPQ Auto 3.2.19</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="checkUpdates" class="header-update-check" type="button" title="Nur die veröffentlichte Versionsnummer abfragen; keine automatische Installation.">↻ Update prüfen</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
       <section class="update-notice" id="updateNotice" hidden aria-live="polite"><p id="updateInfo"></p><button id="installUpdate" type="button" hidden>Update installieren</button></section>
       <section class="preflight" id="preflight" hidden aria-label="Bestätigung der Automatik">
         <strong>Vor automatischer Ausführung bestätigen</strong>
@@ -1633,6 +1633,7 @@
       const beforeAssistant = assistantNodes().length;
       const beforeAssistantNode = lastAssistant();
       const beforeUser = userNodes().length;
+      const beforeUserNode = userNodes().at(-1) || null;
       const adopting = !projectButton && approvedDraft();
       if (!projectButton && !adopting && !editorEmpty(editor)) {
         const check=getEditor();
@@ -1778,7 +1779,7 @@
       const busyNow = generating();
       const ackSawGeneration = lastAckSignal === 'generation_started';
       current = {
-        beforeAssistant, beforeUser, beforeAssistantNode, sendAt: sent,
+        beforeAssistant, beforeUser, beforeAssistantNode, beforeUserNode, sentPrompt: prompt, sendAt: sent,
         sawBusy: ackSawGeneration || busyNow, sawAssistant: false, sawUser: userNodes().length > beforeUser,
         sawBusyEndAt: ackSawGeneration && !busyNow ? Date.now() : 0, lastAssistantActivityAt: sent,
         lastProgressAt: sent, firstAnswerAt: 0, continueClicks: 0,
@@ -1817,7 +1818,19 @@
     // A keyed UI can replace an assistant node without raising the total
     // count. Require BOTH a newly observed user turn and an independently
     // visible completed assistant node; a Stop cycle alone is insufficient.
-    const replacedAssistant = userCount > c.beforeUser
+    // The current keyed renderer may replace BOTH message shells while
+    // keeping the number of turns unchanged. Only accept the replacement
+    // when the new user bubble matches this exact pending outgoing prompt.
+    // Comparison stays in RAM and is never included in diagnostics or ledger.
+    const lastRenderedUser = userNodes().at(-1) || null;
+    const normalizeTurnText = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const samePendingPrompt = !!c.sentPrompt && !!lastRenderedUser
+      && normalizeTurnText(lastRenderedUser.innerText || lastRenderedUser.textContent)
+        === normalizeTurnText(c.sentPrompt);
+    const userTurnReplaced = !!lastRenderedUser && !!c.beforeUserNode
+      && lastRenderedUser !== c.beforeUserNode && samePendingPrompt;
+    const userTurnConfirmed = userCount > c.beforeUser || userTurnReplaced;
+    const replacedAssistant = userTurnConfirmed
       && !!lastRenderedAssistant && !!c.beforeAssistantNode
       && lastRenderedAssistant !== c.beforeAssistantNode
       && lastRenderedTurn.signal === 'conversation-role'
@@ -1825,7 +1838,7 @@
         'button[data-testid="copy-turn-action-button"], .turn-action-controls button'
       );
     const newAssistant = assistantCount > c.beforeAssistant || replacedAssistant;
-    const newUser = userCount > c.beforeUser;
+    const newUser = userTurnConfirmed;
     // Nach langem Background-Stillstand kann die Antwort inzwischen fertig sein.
     // Zuerst den aktuellen DOM-Zustand pruefen; abgelaufene Wall-Clock allein
     // ist kein Grund, eine fertig vorliegende Antwort zu verwerfen.
