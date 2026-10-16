@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CPQ Auto — Projekt-Autopilot
 // @namespace    local.chatgpt.promptqueue
-// @version      3.2.14
-// @description  V3.2.14: Längere Denkzeiten und lokaler Speicher für Fortsetzungsprompts.
+// @version      3.2.15
+// @description  V3.2.15: Update-Prüfung oben im CPQ-Panel, weiterhin via Tampermonkey.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-idle
@@ -10,11 +10,13 @@
 // @downloadURL  https://raw.githubusercontent.com/Derogatary/cpq-autopilot-updates/main/cpq-autopilot.user.js
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @connect      raw.githubusercontent.com
 // ==/UserScript==
 
 (() => {
   'use strict';
-  const VERSION = '3.2.14-prompt-library';
+  const VERSION = '3.2.15-update-check';
   if (document.querySelector('#cpq-v3-host')) return;
 
   const KEY = 'chatgpt-prompt-queue:v3.1auto';
@@ -22,6 +24,7 @@
   const CHAT_CONFIG_PREFIX = 'cpq:chat-settings:v3.2.6:';
   const LEDGER_PREFIX = 'cpq:v3.2:run:';
   const LEDGER_MAX = 60;
+  const RELEASE_URL = 'https://raw.githubusercontent.com/Derogatary/cpq-autopilot-updates/main/cpq-autopilot.user.js';
   const AUTOMATED = new Set(['auto', 'continue-only', 'project']);
   const MAX_STEPS = 50;
   const MAX_AUTO_MESSAGES = 50;
@@ -105,11 +108,17 @@
       .panel { position:fixed;right:18px;top:52px;display:none;width:min(440px,calc(100vw - 26px));max-height:min(86vh,780px);overflow-y:auto;overflow-x:hidden; padding:0 15px 15px;background:#161e2b;border:1px solid #57667f;border-radius:15px;color:#f4f6fa;font:13px/1.45 system-ui;box-shadow:0 14px 45px #0008; }
       .panel.open { display:block; }
       header { position:sticky;top:0;z-index:40;display:flex;justify-content:space-between;align-items:center;gap:10px;margin:0 -15px 8px;padding:12px 15px;background:#161e2b;border-bottom:1px solid #43536c;box-shadow:0 3px 9px #0004; }
-      header strong { font-size:15px; }
+      header strong { font-size:14px; min-width:0; }
       .close { border:0;background:#313d52;color:white;border-radius:6px;padding:5px 11px;font-size:20px;line-height:1.1;flex:none; }
       .header-actions { display:flex;align-items:center;gap:7px;flex:none; }
       .header-quick-start { border:1px solid #90bcff;background:#2469cc;color:white;border-radius:7px;padding:8px 10px;font-weight:700;white-space:nowrap;line-height:1.2; }
       .header-quick-start:focus-visible { outline:2px solid white;outline-offset:2px; }
+      .header-update-check { border:1px solid #7d94b6;background:#293d59;color:white;border-radius:7px;padding:8px 7px;font-size:11px;font-weight:600;white-space:nowrap;line-height:1.2; }
+      .header-update-check:focus-visible {outline:2px solid white;outline-offset:2px;}
+      .update-notice {padding:9px 10px;margin:6px 0 10px;border:1px solid #597396;border-radius:9px;background:#202f46;}
+      .update-notice p {margin:0 0 5px;overflow-wrap:anywhere;}
+      .update-notice button {border:1px solid #90bcff;background:#2469cc;color:white;border-radius:7px;padding:6px 10px;}
+      @media (max-width:400px) { header { flex-wrap:wrap; } .header-actions { width:100%;justify-content:flex-end; } }
       label { display:block;font-weight:600;margin:9px 0 4px; }
       textarea, select { width:100%;border:1px solid #5c6c82;border-radius:8px;background:#263247;color:#fafafa;padding:8px; }
       textarea { min-height:130px;resize:vertical;line-height:1.5; }
@@ -140,7 +149,8 @@
     </style>
     <button id="launch" class="launch" type="button" data-state="idle" title="CPQ öffnen">CPQ</button>
     <section class="panel" id="panel" aria-label="ChatGPT Prompt Queue">
-      <header><strong>CPQ Auto 3.2.14</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
+      <header><strong>CPQ Auto 3.2.15</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="checkUpdates" class="header-update-check" type="button" title="Nur die veröffentlichte Versionsnummer abfragen; keine automatische Installation.">↻ Update prüfen</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
+      <section class="update-notice" id="updateNotice" hidden aria-live="polite"><p id="updateInfo"></p><button id="installUpdate" type="button" hidden>Update installieren</button></section>
       <section class="preflight" id="preflight" hidden aria-label="Bestätigung der Automatik">
         <strong>Vor automatischer Ausführung bestätigen</strong>
         <p id="preflightSummary">Bitte prüfe die geplanten Aktionen.</p>
@@ -219,6 +229,7 @@
     maxProject: $('maxProject'), runStrategy: $('runStrategy'), durationHours: $('durationHours'), projectPrompt: $('projectPrompt'),
     promptPresetSelect: $('promptPresetSelect'), promptPresetName: $('promptPresetName'), promptPresetLoad: $('promptPresetLoad'), promptPresetSave: $('promptPresetSave'), promptPresetDelete: $('promptPresetDelete'), promptPresetStatus: $('promptPresetStatus'), projectClick: $('projectClick'), fallbackMissingMarker: $('fallbackMissingMarker'), fallbackContinueText: $('fallbackContinueText'),
     autoContinue: $('autoContinue'), start: $('start'), quickStart: $('quickStart'),
+    checkUpdates: $('checkUpdates'), updateNotice: $('updateNotice'), updateInfo: $('updateInfo'), installUpdate: $('installUpdate'),
     approve: $('approve'), pause: $('pause'), stop: $('stop'), sendNow: $('sendNow'),
     state: $('state'), detail: $('detail'), progress: $('progress'), diagnostics: $('diagnostics'), copyDiagnostic: $('copyDiagnostic'), diagnosticNotice: $('diagnosticNotice'), diagnosticReport: $('diagnosticReport'),
     projectLabel: $('projectLabel'), loopGuard:$('loopGuard'), checkpointEvery:$('checkpointEvery'), toggleProjects:$('toggleProjects'), restoreRun:$('restoreRun'), discardRun:$('discardRun'), recoveryInfo:$('recoveryInfo'), projectList:$('projectList'),
@@ -464,6 +475,82 @@
   ui.close.addEventListener('click', () => {
     ui.panel.classList.remove('open'); ui.launch.style.display = '';
   });
+  // Manual update lookup only. No tracking of chats, prompts or IDs and
+  // no background polling. Installation is a separate explicit user click.
+  function compareCpqVersions(left, right) {
+    const parse = value => /^\d+\.\d+\.\d+$/.test(value) ? value.split('.').map(Number) : null;
+    const a = parse(left), b = parse(right);
+    if (!a || !b) return null;
+    for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1;
+    return 0;
+  }
+  function versionFromRelease(text) {
+    if (typeof text !== 'string' || text.length > 450000 || !text.startsWith('// ==UserScript==')) return null;
+    const header = text.slice(0, 4500).split('// ==/UserScript==')[0];
+    if (!header.includes('// ==UserScript==') || !text.slice(0,4500).includes('// ==/UserScript==')) return null;
+    const version = header.match(/^\/\/ @version\s+(\d+\.\d+\.\d+)\s*$/m)?.[1] || null;
+    const namespace = header.match(/^\/\/ @namespace\s+(\S+)\s*$/m)?.[1] || '';
+    const url = header.match(/^\/\/ @downloadURL\s+(\S+)\s*$/m)?.[1] || '';
+    return namespace === 'local.chatgpt.promptqueue' && url === RELEASE_URL ? version : null;
+  }
+  let latestReleaseVersion = null;
+  let updateCheckPending = false;
+  const installedVersion = '3.2.15';
+  function updateNotice(message, available=false) {
+    ui.updateNotice.hidden = false;
+    ui.updateInfo.textContent = message;
+    ui.installUpdate.hidden = !available;
+    ui.checkUpdates.disabled = updateCheckPending;
+  }
+  ui.checkUpdates.addEventListener('click', () => {
+    if (updateCheckPending) return;
+    latestReleaseVersion = null;
+    if (typeof GM_xmlhttpRequest !== 'function') {
+      updateNotice('Die manuelle Updateprüfung ist nur im Tampermonkey-Userscript verfügbar. Nutze sonst Tampermonkey → Hilfsmittel.');
+      return;
+    }
+    updateCheckPending = true;
+    updateNotice('Prüfe die öffentliche CPQ-Version …');
+    try {
+      GM_xmlhttpRequest({
+        method:'GET', url: RELEASE_URL + '?cpq_version_check=' + Date.now(),
+        timeout:15000,
+        onload: response => {
+          updateCheckPending = false;
+          if (response.status !== 200) {
+            updateNotice('Updateprüfung nicht möglich (HTTP '+response.status+'). Tampermonkey → Hilfsmittel bleibt verfügbar.');
+            return;
+          }
+          const found = versionFromRelease(response.responseText);
+          const order = found ? compareCpqVersions(found, installedVersion) : null;
+          if (order === null) updateNotice('Release-Metadaten nicht eindeutig. Bitte Tampermonkey → Hilfsmittel verwenden.');
+          else if (order > 0) {
+            latestReleaseVersion = found;
+            updateNotice('Neue CPQ-Version v'+found+' verfügbar (installiert: v'+installedVersion+').',true);
+          } else if (order === 0) updateNotice('CPQ v'+installedVersion+' ist aktuell.');
+          else updateNotice('Installiert: v'+installedVersion+'. Öffentlicher Updatekanal liefert noch v'+found+'; kein Downgrade.');
+        },
+        onerror: () => { updateCheckPending=false; updateNotice('Keine Verbindung zum Updatekanal. Versuche Tampermonkey → Hilfsmittel.'); },
+        ontimeout: () => { updateCheckPending=false; updateNotice('Updateprüfung hat zu lange gedauert. Versuche Tampermonkey → Hilfsmittel.'); }
+      });
+    } catch (_) {
+      updateCheckPending=false;
+      updateNotice('Updateprüfung gescheitert. Nutze Tampermonkey → Hilfsmittel.');
+    }
+  });
+  ui.installUpdate.addEventListener('click', () => {
+    if (!latestReleaseVersion || compareCpqVersions(latestReleaseVersion, installedVersion) !== 1) return;
+    if (running || sendingInProgress || awaitingRunApproval) {
+      updateNotice('Vor der Installation den aktiven CPQ-Lauf beenden bzw. Startfreigabe schließen.',true);
+      return;
+    }
+    // A previously sent, unresolved message is never marked answered here.
+    // The installed script is loaded by Tampermonkey in a separate tab.
+    const tab = window.open(RELEASE_URL, '_blank', 'noopener,noreferrer');
+    updateNotice('Installationsseite geöffnet. In Tampermonkey die Aktualisierung ausdrücklich bestätigen.');
+    void tab;
+  });
+
 
   function positionLauncher() {
     // ChatGPT frequently replaces its header. Use coordinates rather than
