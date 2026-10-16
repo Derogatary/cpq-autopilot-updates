@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CPQ Auto — Projekt-Autopilot
 // @namespace    local.chatgpt.promptqueue
-// @version      3.2.13
-// @description  V3.2.13: Neue ChatGPT-Turn-Key-Struktur erkennen und Antwortdiagnose verbessern.
+// @version      3.2.14
+// @description  V3.2.14: Längere Denkzeiten und lokaler Speicher für Fortsetzungsprompts.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-idle
@@ -14,7 +14,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.13-turn-key-dom';
+  const VERSION = '3.2.14-prompt-library';
   if (document.querySelector('#cpq-v3-host')) return;
 
   const KEY = 'chatgpt-prompt-queue:v3.1auto';
@@ -25,7 +25,11 @@
   const AUTOMATED = new Set(['auto', 'continue-only', 'project']);
   const MAX_STEPS = 50;
   const MAX_AUTO_MESSAGES = 50;
-  const TIMEOUT_MS = 15 * 60 * 1000;
+  const REPLY_TIMEOUT_CHOICES = [30, 60, 120];
+  const PROMPT_LIBRARY_KEY = 'cpq:continuation-presets:v1';
+  const MAX_PROMPT_PRESETS = 30;
+  const MAX_PRESET_NAME = 60;
+  const MAX_PRESET_TEXT = 2000;
   // Explicit tool activity can outlive model thinking and the normal reply timer.
   // Still fail closed after an upper bound rather than waiting indefinitely.
   const TOOL_MAX_WAIT_MS = 60 * 60 * 1000;
@@ -60,7 +64,7 @@
     single: 'Analysiere die aktuelle Aufgabe systematisch. Nenne Annahmen, löse die Kernfrage und liefere überprüfbare nächste Schritte.'
   };
 
-  const safeSettings = { mode: 'review', waitSeconds: 12, autoContinue: true, maxContinue: 2, maxProject: 5, projectClick: false, projectPrompt: DEFAULT_PROJECT_PROMPT, fallbackMissingMarker: true, fallbackContinueText: true, loopGuard:true, checkpointEvery:0, runStrategy:'count', durationHours:0 };
+  const safeSettings = { mode: 'review', waitSeconds: 12, autoContinue: true, maxContinue: 2, maxProject: 5, projectClick: false, projectPrompt: DEFAULT_PROJECT_PROMPT, fallbackMissingMarker: true, fallbackContinueText: true, loopGuard:true, checkpointEvery:0, runStrategy:'count', durationHours:0, replyTimeoutMinutes:60 };
   let initial = { text: '', ...safeSettings };
   try {
     const saved = typeof GM_getValue === 'function' ? GM_getValue(KEY, '') : '';
@@ -79,6 +83,7 @@
     if ([0,5,10,20].includes(Number(loaded.checkpointEvery))) initial.checkpointEvery = Number(loaded.checkpointEvery);
     if (['count','marker'].includes(loaded.runStrategy)) initial.runStrategy = loaded.runStrategy;
     if ([0,1,3,8].includes(Number(loaded.durationHours))) initial.durationHours = Number(loaded.durationHours);
+    if (REPLY_TIMEOUT_CHOICES.includes(Number(loaded.replyTimeoutMinutes))) initial.replyTimeoutMinutes = Number(loaded.replyTimeoutMinutes);
   } catch (_) { /* Ohne Speicher nutzbar */ }
 
   const host = document.createElement('div');
@@ -135,7 +140,7 @@
     </style>
     <button id="launch" class="launch" type="button" data-state="idle" title="CPQ öffnen">CPQ</button>
     <section class="panel" id="panel" aria-label="ChatGPT Prompt Queue">
-      <header><strong>CPQ Auto 3.2.13</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
+      <header><strong>CPQ Auto 3.2.14</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
       <section class="preflight" id="preflight" hidden aria-label="Bestätigung der Automatik">
         <strong>Vor automatischer Ausführung bestätigen</strong>
         <p id="preflightSummary">Bitte prüfe die geplanten Aktionen.</p>
@@ -155,6 +160,9 @@
       <textarea id="queue" spellcheck="true" placeholder="Erster Prompt …\n===\nZweiter Prompt …"></textarea>
       <label for="mode">Modus</label>
       <select id="mode"><option value="review">Mit Freigabe nach jeder Antwort</option><option value="auto">Automatisch nächsten Prompt senden</option><option value="continue-only">Auto-Weiter: Button oder Nachricht</option><option value="project">Projekt-Autopilot (Marker optional)</option><option value="diagnose">Diagnose (sendet und klickt nichts)</option></select>
+      <label for="replyTimeoutMinutes">Maximale Antwort-Wartezeit (auch lange Denkphasen)</label>
+      <select id="replyTimeoutMinutes"><option value="30">30 Minuten</option><option value="60">60 Minuten (Standard)</option><option value="120">120 Minuten</option></select>
+      <p class="note">Pro Antwort, unabhängig von der maximalen Gesamtlaufzeit. Bei Ablauf Prüf-Stopp, kein zweiter Versand.</p>
       <div class="row">
         <div><label for="stability">Ruhephase nach Antwort</label><select id="stability"><option value="8">8 Sekunden</option><option value="12">12 Sekunden</option><option value="20">20 Sekunden</option></select></div>
         <div><label for="maxContinue">Maximal „Weiter“</label><select id="maxContinue"><option value="1">1× je Antwort</option><option value="2">2× je Antwort</option><option value="3">3× je Antwort</option></select></div>
@@ -172,6 +180,15 @@
         <p class="note warning">Lange Ketten ab 15 Nachrichten können viele Nutzungsanfragen erzeugen. Das Limit gilt pro Start. Die automatische Erkennung des inhaltlichen Projektendes ist ohne [[CPQ:FERTIG]] nicht garantiert.</p>
         <label for="projectPrompt">Fortsetzungsnachricht (auch ohne Button/Marker)</label>
         <textarea id="projectPrompt" spellcheck="true" style="min-height:80px"></textarea>
+        <div class="scope" aria-label="Lokaler Fortsetzungsprompt-Speicher">
+          <strong>Gespeicherte Fortsetzungsprompts · nur lokal</strong>
+          <label for="promptPresetSelect">Gespeicherten Prompt wählen</label>
+          <select id="promptPresetSelect"><option value="">– Bitte auswählen –</option></select>
+          <label for="promptPresetName">Name des Prompts</label>
+          <input id="promptPresetName" maxlength="60" placeholder="z. B. Ratgeber – nächster Schritt" autocomplete="off" style="width:100%;padding:7px;border:1px solid #5c6c82;border-radius:7px;background:#263247;color:#fff"/>
+          <div class="buttons"><button id="promptPresetLoad" type="button">Übernehmen</button><button id="promptPresetSave" type="button">Speichern</button><button id="promptPresetDelete" type="button">Löschen</button></div>
+          <p id="promptPresetStatus" class="scope-small" aria-live="polite">Bis zu 30 benannte Texte. Kein automatischer Versand.</p>
+        </div>
         <label class="checkbox"><input id="fallbackMissingMarker" type="checkbox"/> Projektmodus: Bei fehlendem CPQ-Marker automatisch fortsetzen (bis zum Limit)</label>
         <label class="checkbox"><input id="projectClick" type="checkbox"/> Experimentell: echten „Weiter · CPQ“-Button anklicken, falls vorhanden (sonst Nachricht senden)</label>
         <p class="note warning">Ohne Marker kann das Script NICHT selbst erkennen, ob alle Projektarbeiten erledigt sind. Es setzt bis zur Obergrenze fort. [[CPQ:FERTIG]] stoppt; [[CPQ:PRUEFEN]] pausiert. Bei unbekanntem Zustand ebenfalls Pause.</p>
@@ -198,8 +215,9 @@
     launch: $('launch'), panel: $('panel'), close: $('close'),
     preset: $('preset'), queue: $('queue'), mode: $('mode'),
     globalSwitch: $('globalSwitch'), chatSwitch: $('chatSwitch'), scopeText: $('scopeText'),
-    stability: $('stability'), maxContinue: $('maxContinue'),
-    maxProject: $('maxProject'), runStrategy: $('runStrategy'), durationHours: $('durationHours'), projectPrompt: $('projectPrompt'), projectClick: $('projectClick'), fallbackMissingMarker: $('fallbackMissingMarker'), fallbackContinueText: $('fallbackContinueText'),
+    stability: $('stability'), replyTimeoutMinutes: $('replyTimeoutMinutes'), maxContinue: $('maxContinue'),
+    maxProject: $('maxProject'), runStrategy: $('runStrategy'), durationHours: $('durationHours'), projectPrompt: $('projectPrompt'),
+    promptPresetSelect: $('promptPresetSelect'), promptPresetName: $('promptPresetName'), promptPresetLoad: $('promptPresetLoad'), promptPresetSave: $('promptPresetSave'), promptPresetDelete: $('promptPresetDelete'), promptPresetStatus: $('promptPresetStatus'), projectClick: $('projectClick'), fallbackMissingMarker: $('fallbackMissingMarker'), fallbackContinueText: $('fallbackContinueText'),
     autoContinue: $('autoContinue'), start: $('start'), quickStart: $('quickStart'),
     approve: $('approve'), pause: $('pause'), stop: $('stop'), sendNow: $('sendNow'),
     state: $('state'), detail: $('detail'), progress: $('progress'), diagnostics: $('diagnostics'), copyDiagnostic: $('copyDiagnostic'), diagnosticNotice: $('diagnosticNotice'), diagnosticReport: $('diagnosticReport'),
@@ -214,6 +232,7 @@
   ui.maxProject.value = String(initial.maxProject);
   ui.runStrategy.value = initial.runStrategy;
   ui.durationHours.value = String(initial.durationHours);
+  ui.replyTimeoutMinutes.value = String(initial.replyTimeoutMinutes);
   ui.projectPrompt.value = initial.projectPrompt;
   ui.loopGuard.checked = initial.loopGuard;
   ui.checkpointEvery.value = String(initial.checkpointEvery);
@@ -320,6 +339,7 @@
     if ([0,5,10,20].includes(Number(data.checkpointEvery))) ui.checkpointEvery.value = String(data.checkpointEvery);
     if (['count','marker'].includes(data.runStrategy)) ui.runStrategy.value = data.runStrategy;
     if ([0,1,3,8].includes(Number(data.durationHours))) ui.durationHours.value = String(data.durationHours);
+    if (REPLY_TIMEOUT_CHOICES.includes(Number(data.replyTimeoutMinutes))) ui.replyTimeoutMinutes.value = String(data.replyTimeoutMinutes);
   }
   // ChatGPT navigiert häufig als SPA ohne Neuladen. Die zuletzt sichtbare
   // Auswahl darf dann weder Start blockieren noch in einen anderen Chat gelangen.
@@ -382,6 +402,7 @@
         if ([0,5,10,20].includes(Number(data.checkpointEvery))) ui.checkpointEvery.value = String(data.checkpointEvery);
     if (['count','marker'].includes(data.runStrategy)) ui.runStrategy.value = data.runStrategy;
     if ([0,1,3,8].includes(Number(data.durationHours))) ui.durationHours.value = String(data.durationHours);
+    if (REPLY_TIMEOUT_CHOICES.includes(Number(data.replyTimeoutMinutes))) ui.replyTimeoutMinutes.value = String(data.replyTimeoutMinutes);
       } else {
         // Alte gespeicherte Werte werden beim Versionswechsel uebernommen.
         chrome.storage.local.set({ [KEY]: initial });
@@ -411,7 +432,8 @@
         loopGuard: ui.loopGuard.checked,
         checkpointEvery: Number(ui.checkpointEvery.value),
         runStrategy: ui.runStrategy.value,
-        durationHours: Number(ui.durationHours.value)
+        durationHours: Number(ui.durationHours.value),
+        replyTimeoutMinutes: Number(ui.replyTimeoutMinutes.value)
       };
       const key=chatConfigKey();
       if (typeof chrome !== 'undefined' && chrome.storage?.local) {
@@ -426,7 +448,7 @@
     } catch (_) { /* Ohne Storage weiter */ }
   }
   if (storageReady) setTimeout(() => loadChatSettings(() => {render();updateRecoveryUI();}), 0);
-  for (const el of [ui.queue, ui.mode, ui.stability, ui.maxContinue, ui.autoContinue, ui.maxProject, ui.projectPrompt, ui.projectClick, ui.fallbackMissingMarker, ui.fallbackContinueText, ui.loopGuard, ui.checkpointEvery, ui.runStrategy, ui.durationHours]) {
+  for (const el of [ui.queue, ui.mode, ui.stability, ui.maxContinue, ui.autoContinue, ui.maxProject, ui.projectPrompt, ui.projectClick, ui.fallbackMissingMarker, ui.fallbackContinueText, ui.loopGuard, ui.checkpointEvery, ui.runStrategy, ui.durationHours, ui.replyTimeoutMinutes]) {
     el.addEventListener(el === ui.queue || el === ui.projectPrompt ? 'input' : 'change', persist);
   }
   ui.mode.addEventListener('change', () => {render();updateRecoveryUI();});
@@ -1171,7 +1193,7 @@
       tool: 'CPQ Auto', version: VERSION, capturedAt: new Date().toISOString(),
       chatScope: exactChatRoute() ? 'Chat-Route erkannt (ID nicht enthalten)' : 'keine Chat-Route',
       approvedForThisChat: approvedHere(), globalScopeLoaded: scopeReady,
-      run: {mode, running, paused, phase, completed, projectCount, batchCount:approvedBatchCount(), runStrategy:ui.runStrategy.value, durationHours:Number(ui.durationHours.value), deadlineReached:runTimedOut(), lastState: message},
+      run: {mode, running, paused, phase, completed, projectCount, batchCount:approvedBatchCount(), runStrategy:ui.runStrategy.value, durationHours:Number(ui.durationHours.value), replyTimeoutMinutes:Number(ui.replyTimeoutMinutes.value), deadlineReached:runTimedOut(), lastState: message},
       controls: {editorType, editorHasDraft: !!editor && !editorEmpty(editor), editorDetectedChars:editorDiagnostic().chars, composerFound:!!editor, sendButton: !sb ? 'fehlt' : usable(sb) ? 'bereit' : 'deaktiviert', generating: generating(), toolBusy: toolActivity().active, toolSignal: toolActivity().source, nativeContinue: !!continueButton(), webLocksAvailable: !!navigator.locks?.request, exclusiveLockHeld: !!exclusiveLockRelease},
       recognition: {assistantTurns: t.filter(x=>x.role==='assistant').length, userTurns: t.filter(x=>x.role==='user').length, lastSignal: t.at(-1)?.signal || 'keins', lastRole: t.at(-1)?.role || 'keine', rootKind, turnCandidateCount, domProbe},
       identityCheck: {status:idCheck.status,inspected:idCheck.inspected,identified:idCheck.identified,sources:idCheck.sources,resumeFingerprintAvailable:!!idCheck.fingerprint},
@@ -1295,8 +1317,9 @@
     ui.start.disabled = running || exclusiveLockPending || !storageReady || configLoading ||
       (configRoute !== null && configRoute !== exactChatRoute()) || (AUTOMATED.has(ui.mode.value) && !approvedHere());
     ui.quickStart.disabled = ui.start.disabled;
+    for (const el of [ui.promptPresetSelect,ui.promptPresetName,ui.promptPresetLoad,ui.promptPresetSave,ui.promptPresetDelete]) el.disabled=running || !promptLibraryReady || awaitingRunApproval;
     redrawScope();
-    for (const el of [ui.preset, ui.queue, ui.mode, ui.stability, ui.maxContinue, ui.autoContinue, ui.maxProject, ui.projectPrompt, ui.projectClick, ui.fallbackMissingMarker, ui.fallbackContinueText, ui.loopGuard, ui.checkpointEvery, ui.runStrategy, ui.durationHours, ui.projectLabel]) el.disabled = running;
+    for (const el of [ui.preset, ui.queue, ui.mode, ui.stability, ui.maxContinue, ui.autoContinue, ui.maxProject, ui.projectPrompt, ui.projectClick, ui.fallbackMissingMarker, ui.fallbackContinueText, ui.loopGuard, ui.checkpointEvery, ui.runStrategy, ui.durationHours, ui.replyTimeoutMinutes, ui.projectLabel]) el.disabled = running;
     ui.approve.disabled = !running || mode !== 'review' || !paused || !!current || completed >= queue.length || phase !== 'ready';
     ui.pause.disabled = !running;
     ui.pause.textContent = paused ? 'Fortsetzen' : 'Pause';
@@ -1610,6 +1633,10 @@
     }
   }
 
+  function replyTimeoutMs() {
+    const minutes = Number(ui.replyTimeoutMinutes.value);
+    return (REPLY_TIMEOUT_CHOICES.includes(minutes) ? minutes : 60) * 60 * 1000;
+  }
   function handleAnswer(now) {
     const c = current;
     if (!c) return;
@@ -1681,10 +1708,10 @@
     // Reconcile the current DOM after waking BEFORE evaluating an old
     // wall-clock deadline. A complete response could have finished while
     // this tab was throttled, even if the thread is not parseable.
-    if (now - c.sendAt >= TIMEOUT_MS && (busy || (!newAssistant && !c.sawBusyEndAt))) {
+    if (now - c.sendAt >= replyTimeoutMs() && (busy || (!newAssistant && !c.sawBusyEndAt))) {
       halt('Antwortüberwachung abgebrochen', busy
-        ? 'Nach 15 Minuten weiterhin eine laufende Generierung erkannt. Chat kontrollieren; kein zweiter Sendeklick.'
-        : 'Nach 15 Minuten keine abgeschlossene Antwort erkennbar. Versand wurde bereits bestätigt, Antwort bleibt ungeklärt. Bitte Chat prüfen; kein automatischer Zweitversuch.'); return;
+        ? `Nach ${ui.replyTimeoutMinutes.value} Minuten weiterhin eine laufende Generierung erkannt. Chat kontrollieren; kein zweiter Sendeklick.`
+        : `Nach ${ui.replyTimeoutMinutes.value} Minuten keine abgeschlossene Antwort erkennbar. Versand bestätigt, Antwort ungeklärt. Bitte prüfen; kein Zweitversuch.`); return;
     }
     if (c.waitingAfterContinue) {
       if (!continueButton() && c.lastAssistantActivityAt > c.continueClickedAt) {
@@ -1904,6 +1931,111 @@
   }
 
   let awaitingRunApproval = false;
+  // The named continuation prompts are LOCAL settings, never transferred
+  // together with chat approvals, active tasks or pending send records.
+  let promptPresets = [];
+  let promptLibraryReady = false;
+  function parsePromptLibrary(raw) {
+    let data = raw;
+    try { if (typeof data === 'string') data = JSON.parse(data || '{}'); } catch (_) { return []; }
+    if (!data || !Array.isArray(data.items)) return [];
+    const names = new Set();
+    return data.items.filter(entry => {
+      if (!entry || typeof entry.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(entry.id)
+          || typeof entry.name !== 'string' || !entry.name.trim()
+          || entry.name.length > MAX_PRESET_NAME || typeof entry.text !== 'string'
+          || !entry.text.trim() || entry.text.length > MAX_PRESET_TEXT) return false;
+      const key=entry.name.toLocaleLowerCase('de-DE');
+      if (names.has(key)) return false;
+      names.add(key);
+      return true;
+    }).slice(0,MAX_PROMPT_PRESETS).map(({id,name,text})=>({id,name,text}));
+  }
+  function presetMessage(message) { ui.promptPresetStatus.textContent = message; }
+  function renderPromptLibrary(selected='') {
+    const active=selected || ui.promptPresetSelect.value;
+    ui.promptPresetSelect.replaceChildren(new Option('– Bitte auswählen –',''));
+    for (const entry of promptPresets) ui.promptPresetSelect.add(new Option(entry.name,entry.id));
+    if (promptPresets.some(x=>x.id===active)) ui.promptPresetSelect.value=active;
+    presetMessage(promptPresets.length+'/'+MAX_PROMPT_PRESETS+' benannte Prompts lokal gespeichert. Auswahl startet nichts.');
+  }
+  function loadPromptLibrary() {
+    const finish = raw => {
+      promptPresets=parsePromptLibrary(raw);
+      promptLibraryReady=true;
+      renderPromptLibrary();
+      render();
+    };
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local)
+        chrome.storage.local.get(PROMPT_LIBRARY_KEY, values=>finish(values?.[PROMPT_LIBRARY_KEY]));
+      else if (typeof GM_getValue === 'function') finish(GM_getValue(PROMPT_LIBRARY_KEY, ''));
+      else finish(localStorage.getItem(PROMPT_LIBRARY_KEY) || '');
+    } catch (_) { promptLibraryReady=false; presetMessage('Promptspeicher nicht lesbar.'); }
+  }
+  function storePromptLibrary(next, done) {
+    const payload=JSON.stringify({schema:1,items:next});
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+        chrome.storage.local.set({[PROMPT_LIBRARY_KEY]:payload},()=>{
+          if (chrome.runtime?.lastError) {presetMessage('Speichern fehlgeschlagen.'); return;}
+          promptPresets=next;
+          done();
+        });
+      } else {
+        if (typeof GM_setValue === 'function') GM_setValue(PROMPT_LIBRARY_KEY,payload);
+        else localStorage.setItem(PROMPT_LIBRARY_KEY,payload);
+        promptPresets=next; done();
+      }
+    } catch (_) { presetMessage('Speichern fehlgeschlagen.'); }
+  }
+  function canEditPromptLibrary() {
+    if (running || awaitingRunApproval || !promptLibraryReady || !storageReady || configLoading) {
+      presetMessage('Während eines Laufs, der Freigabe oder des Ladens ist der Promptspeicher gesperrt.');
+      return false;
+    }
+    return true;
+  }
+  ui.promptPresetSelect.addEventListener('change',()=>{
+    const selected=promptPresets.find(x=>x.id===ui.promptPresetSelect.value);
+    if (selected) ui.promptPresetName.value=selected.name;
+  });
+  ui.promptPresetLoad.addEventListener('click',()=>{
+    if (!canEditPromptLibrary()) return;
+    const entry=promptPresets.find(x=>x.id===ui.promptPresetSelect.value);
+    if (!entry) {presetMessage('Bitte zuerst einen gespeicherten Prompt auswählen.');return;}
+    ui.projectPrompt.value=entry.text;
+    ui.promptPresetName.value=entry.name;
+    persist();
+    presetMessage('„'+entry.name+'“ übernommen. Erst die normale Lauf-Freigabe erlaubt einen Versand.');
+  });
+  ui.promptPresetSave.addEventListener('click',()=>{
+    if (!canEditPromptLibrary()) return;
+    const name=ui.promptPresetName.value.trim();
+    const content=ui.projectPrompt.value.trim();
+    if (!name || name.length>MAX_PRESET_NAME || !content || content.length>MAX_PRESET_TEXT) {
+      presetMessage('Name (1–60 Zeichen) und Fortsetzungstext (1–2000 Zeichen) erforderlich.');return;
+    }
+    const existing=promptPresets.find(x=>x.name.toLocaleLowerCase('de-DE')===name.toLocaleLowerCase('de-DE'));
+    if (existing && !window.confirm('Gespeicherten Prompt „'+existing.name+'“ überschreiben?')) return;
+    if (!existing && promptPresets.length>=MAX_PROMPT_PRESETS) {presetMessage('Maximal 30 Prompts gespeichert.');return;}
+    const id=existing?.id || ('p'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,11));
+    const entry={id,name,text:content};
+    const next=existing?promptPresets.map(x=>x.id===existing.id?entry:x):[...promptPresets,entry];
+    storePromptLibrary(next,()=>{renderPromptLibrary(id);ui.promptPresetSelect.value=id;presetMessage('„'+name+'“ lokal gespeichert.');});
+  });
+  ui.promptPresetDelete.addEventListener('click',()=>{
+    if (!canEditPromptLibrary()) return;
+    const entry=promptPresets.find(x=>x.id===ui.promptPresetSelect.value);
+    if (!entry) {presetMessage('Bitte erst einen gespeicherten Prompt auswählen.');return;}
+    if (!window.confirm('Gespeicherten Prompt „'+entry.name+'“ endgültig löschen?')) return;
+    storePromptLibrary(promptPresets.filter(x=>x.id!==entry.id),()=>{
+      ui.promptPresetName.value='';
+      renderPromptLibrary();
+      presetMessage('„'+entry.name+'“ gelöscht. Der aktuelle Fortsetzungstext bleibt erhalten.');
+    });
+  });
+  loadPromptLibrary();
   let preflightRoute = '';
   let approvalGranted = false;
   function dismissPreflight() {
@@ -1925,7 +2057,7 @@
     ui.preflight.hidden = true;
     ui.start.click();
   });
-  for (const el of [ui.preset, ui.queue, ui.mode, ui.stability, ui.maxContinue, ui.autoContinue, ui.maxProject, ui.projectPrompt, ui.projectClick, ui.fallbackMissingMarker, ui.fallbackContinueText, ui.loopGuard, ui.checkpointEvery, ui.runStrategy, ui.durationHours]) {
+  for (const el of [ui.preset, ui.queue, ui.mode, ui.stability, ui.maxContinue, ui.autoContinue, ui.maxProject, ui.projectPrompt, ui.projectClick, ui.fallbackMissingMarker, ui.fallbackContinueText, ui.loopGuard, ui.checkpointEvery, ui.runStrategy, ui.durationHours, ui.replyTimeoutMinutes]) {
     el.addEventListener('input', () => { if (awaitingRunApproval) dismissPreflight(); });
     el.addEventListener('change', () => { if (awaitingRunApproval) dismissPreflight(); });
   }
