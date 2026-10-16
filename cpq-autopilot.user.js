@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CPQ Auto — Projekt-Autopilot
 // @namespace    local.chatgpt.promptqueue
-// @version      3.2.12
-// @description  V3.2.12: Sichere automatische Tampermonkey-Updates über öffentliche Installationsdatei.
+// @version      3.2.13
+// @description  V3.2.13: Neue ChatGPT-Turn-Key-Struktur erkennen und Antwortdiagnose verbessern.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-idle
@@ -14,7 +14,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.12-tampermonkey-update';
+  const VERSION = '3.2.13-turn-key-dom';
   if (document.querySelector('#cpq-v3-host')) return;
 
   const KEY = 'chatgpt-prompt-queue:v3.1auto';
@@ -135,7 +135,7 @@
     </style>
     <button id="launch" class="launch" type="button" data-state="idle" title="CPQ öffnen">CPQ</button>
     <section class="panel" id="panel" aria-label="ChatGPT Prompt Queue">
-      <header><strong>CPQ Auto 3.2.12</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
+      <header><strong>CPQ Auto 3.2.13</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
       <section class="preflight" id="preflight" hidden aria-label="Bestätigung der Automatik">
         <strong>Vor automatischer Ausführung bestätigen</strong>
         <p id="preflightSummary">Bitte prüfe die geplanten Aktionen.</p>
@@ -497,11 +497,11 @@
       document.querySelector('main'),
       document.querySelector('[role="main"]')
     ].filter(el => el && !el.closest('#cpq-v3-host, aside, nav, [role="dialog"]'));
-    const signature = '[data-message-author-role], [data-turn="assistant"], [data-turn="user"], [data-testid^="conversation-turn"], [data-testid="assistant-message-content"], [data-testid="user-message-content"], .markdown, .prose';
+    const signature = '[data-message-author-role], [data-turn="assistant"], [data-turn="user"], [data-testid^="conversation-turn"], [data-testid="assistant-message-content"], [data-testid="user-message-content"], [data-turn-key], [data-conversation-role], [data-chatgpt-agent-turn-start], [data-user-message-bubble], .markdown, .prose';
     const count = el => el.querySelectorAll(signature).length;
     const withContent = candidates.filter(el => count(el));
     if (withContent.length) return withContent.sort((a,b) => count(b) - count(a))[0];
-    const detached = [...document.querySelectorAll('[data-message-author-role], [data-testid^="conversation-turn"]')]
+    const detached = [...document.querySelectorAll('[data-message-author-role], [data-testid^="conversation-turn"], [data-turn-key]')]
       .find(el => !el.closest('#cpq-v3-host, aside, nav, [role="dialog"], [role="menu"], form'));
     if (detached) return detached.closest('#thread, main, [role="main"], [data-testid="conversation-panel"]') || detached.parentElement;
     return candidates[0] || null;
@@ -511,6 +511,26 @@
     if (!main) return [];
     const list = [];
     const seen = new Set();
+    // New ChatGPT renderer can group both roles under one data-turn-key.
+    // Each semantic role must count separately; never confuse the shared
+    // parent with a completed assistant answer.
+    const keyedGroups = [...main.querySelectorAll('[data-turn-key]')]
+      .filter(group => !group.parentElement?.closest('[data-turn-key]')
+        && !group.closest('#cpq-v3-host, aside, nav, form, [role="dialog"], [role="menu"]'));
+    const keyedTurns = [];
+    for (const group of keyedGroups) {
+      const user = group.querySelector('[data-user-message-bubble], [data-conversation-role="user"]');
+      const assistantRole = group.querySelector('[data-conversation-role="assistant"]');
+      const assistantStart = group.querySelector('[data-chatgpt-agent-turn-start]');
+      if (user) keyedTurns.push({node:user, role:'user', signal:'turn-key-user'});
+      if (assistantRole || assistantStart) {
+        const answerNode = assistantRole || group;
+        keyedTurns.push({node:answerNode, role:'assistant', signal:assistantRole ? 'conversation-role' : 'turn-key-agent'});
+      }
+    }
+    // The keyed markup is a separate rendering family. Mixing legacy shells
+    // would double-count elements and could lead to duplicate outgoing prompts.
+    if (keyedTurns.some(t => t.role === 'assistant') || (keyedTurns.length && !main.querySelector('[data-message-author-role], [data-testid^="conversation-turn"]'))) return keyedTurns;
     const shells = [...main.querySelectorAll(
       '[data-message-author-role], [data-turn="assistant"], [data-turn="user"], '
       + 'article[data-testid^="conversation-turn"], [data-testid^="conversation-turn-"], '
@@ -563,7 +583,12 @@
     // Ohne einen sicher zugeordneten User-Turn nur dann fortfahren, wenn
     // die Antwort selber eindeutig erkannt ist oder explizit CPQ signalisiert.
     const hasUser = turns.some(t => t.role === 'user');
-    const strong = ['role','testid','feedback','assistant-content'].includes(last.signal);
+    if (last.signal === 'turn-key-agent') {
+      // Agent-start marker only is NOT sufficient evidence of a final reply.
+      const group = last.node.closest?.('[data-turn-key]') || last.node;
+      if (!group.querySelector('button[data-testid="copy-turn-action-button"], .turn-action-controls button')) return false;
+    }
+    const strong = ['role','testid','feedback','assistant-content','conversation-role'].includes(last.signal);
     return hasUser || strong || !!projectMarker();
   }
 
@@ -1127,15 +1152,28 @@
       : conversationRoot.getAttribute('data-testid') === 'conversation-thread' ? 'conversation-thread'
       : 'andere';
     const turnCandidateCount = conversationRoot ? conversationRoot.querySelectorAll(
-      '[data-message-author-role], [data-turn="assistant"], [data-turn="user"], [data-testid^="conversation-turn"], [data-testid="assistant-message-content"], [data-testid="user-message-content"], .markdown, .prose'
+      '[data-message-author-role], [data-turn="assistant"], [data-turn="user"], [data-testid^="conversation-turn"], [data-testid="assistant-message-content"], [data-testid="user-message-content"], [data-turn-key], [data-conversation-role], [data-chatgpt-agent-turn-start], [data-user-message-bubble], .markdown, .prose'
     ).length : 0;
+    // Only aggregate selector counts. Never include IDs, content, role labels,
+    // URLs, DOM markup or tool arguments in copied diagnostics.
+    const domProbe = {
+      mainElements: document.querySelectorAll('main').length,
+      roleMainElements: document.querySelectorAll('[role="main"]').length,
+      documentTurnKeys: document.querySelectorAll('[data-turn-key]').length,
+      rootTurnKeys: conversationRoot?.querySelectorAll('[data-turn-key]').length || 0,
+      documentAssistantRoles: document.querySelectorAll('[data-conversation-role="assistant"]').length,
+      documentAgentStarts: document.querySelectorAll('[data-chatgpt-agent-turn-start]').length,
+      documentUserBubbles: document.querySelectorAll('[data-user-message-bubble]').length,
+      documentLegacyTurns: document.querySelectorAll('[data-message-author-role], [data-testid^="conversation-turn"]').length,
+      documentArticles: document.querySelectorAll('article').length
+    };
     const data = {
       tool: 'CPQ Auto', version: VERSION, capturedAt: new Date().toISOString(),
       chatScope: exactChatRoute() ? 'Chat-Route erkannt (ID nicht enthalten)' : 'keine Chat-Route',
       approvedForThisChat: approvedHere(), globalScopeLoaded: scopeReady,
       run: {mode, running, paused, phase, completed, projectCount, batchCount:approvedBatchCount(), runStrategy:ui.runStrategy.value, durationHours:Number(ui.durationHours.value), deadlineReached:runTimedOut(), lastState: message},
       controls: {editorType, editorHasDraft: !!editor && !editorEmpty(editor), editorDetectedChars:editorDiagnostic().chars, composerFound:!!editor, sendButton: !sb ? 'fehlt' : usable(sb) ? 'bereit' : 'deaktiviert', generating: generating(), toolBusy: toolActivity().active, toolSignal: toolActivity().source, nativeContinue: !!continueButton(), webLocksAvailable: !!navigator.locks?.request, exclusiveLockHeld: !!exclusiveLockRelease},
-      recognition: {assistantTurns: t.filter(x=>x.role==='assistant').length, userTurns: t.filter(x=>x.role==='user').length, lastSignal: t.at(-1)?.signal || 'keins', lastRole: t.at(-1)?.role || 'keine', rootKind, turnCandidateCount},
+      recognition: {assistantTurns: t.filter(x=>x.role==='assistant').length, userTurns: t.filter(x=>x.role==='user').length, lastSignal: t.at(-1)?.signal || 'keins', lastRole: t.at(-1)?.role || 'keine', rootKind, turnCandidateCount, domProbe},
       identityCheck: {status:idCheck.status,inspected:idCheck.inspected,identified:idCheck.identified,sources:idCheck.sources,resumeFingerprintAvailable:!!idCheck.fingerprint},
       delivery: {sendStage, sendingInProgress, lastAckSignal, editorClearedOnlyObserved, awaitingAnswer: !!current, toolSeenInAnswer: !!current?.toolWasActive, toolWaitSeconds: current?.toolFirstSeenAt ? Math.round((Date.now()-current.toolFirstSeenAt)/1000) : 0, ackBackgroundPending, ackBackgroundDeferrals},
       background: {visibility:lifecycleState, windowUnfocused:windowAway, schedulerGapMs:lastSchedulerGapMs, wakeGraceActive:Date.now()<wakeGraceUntil, frozenDuringRun, domWakeups},
@@ -1659,19 +1697,14 @@
       return;
     }
     if (!c.sawAssistant) {
-      // Falls ChatGPT seine Nachrichten-Wrapper erneut aendert, kann die
-      // bestaetigte Stop/Generate-Phase als konservativer Ersatz dienen.
-      // Ohne erkennbaren Busy-Zyklus niemals blind eine weitere Nachricht senden.
+      // A completed Stop-button cycle is not proof of an assistant reply.
+      // Some UI versions render no parseable turns while tool calls continue.
+      // Never queue a follow-up solely because the Stop button disappeared.
       if (c.sawBusy && c.sawBusyEndAt && !busy && !continueButton()) {
-        const editor = getEditor();
         const required = Number(ui.stability.value) * 1000;
-        if (editor && editorEmpty(editor) && now - c.sawBusyEndAt >= required) {
-          c.sawAssistant = true;
-          c.firstAnswerAt = c.sawBusyEndAt;
-          c.lastAssistantActivityAt = c.sawBusyEndAt;
-          phase = 'settling';
-          logStatus('Antwortende via Generierung bestätigt', 'Assistant-Turn fehlt, Stop-Button-Zyklus und Ruhephase sind jedoch bestätigt.');
-          finishStep(now);
+        if (now - c.sawBusyEndAt >= required) {
+          halt('Antwort nicht zuordenbar',
+            'Generierung endete, aber kein neuer Assistant-Turn wurde erkannt. Chat prüfen; kein weiterer Prompt und kein erneuter Sendeklick. Bitte Diagnose mit domProbe senden.');
         }
         return;
       }
@@ -1679,6 +1712,27 @@
       return;
     }
     if (busy) { phase = 'streaming'; return; }
+    const lastTurn = getTurns().at(-1);
+    if (lastTurn?.signal === 'turn-key-agent') {
+      if (now - Math.max(c.sendAt, c.toolLastSeenAt || 0) >= SEND_TIMEOUT_MS) {
+        halt('Agent-Antwort noch nicht bestätigt', 'Nur ein Startmarker erkannt, ohne eindeutige Assistant-Rolle. Kein automatisches Weitersenden; Diagnose mit domProbe prüfen.');
+      }
+      return;
+    }
+    if (lastTurn?.role === 'assistant' && lastTurn.signal === 'conversation-role') {
+      const rendered = lastTurn.node.querySelector(
+        '[data-testid="assistant-message-content"], .markdown, .prose, [data-message-content], [data-composer-markdown]'
+      );
+      const completionAction = (lastTurn.node.closest('[data-turn-key]') || lastTurn.node).querySelector(
+        'button[data-testid="copy-turn-action-button"], .turn-action-controls button'
+      );
+      if (!rendered && !completionAction) {
+        if (now - Math.max(c.sendAt, c.toolLastSeenAt || 0) >= SEND_TIMEOUT_MS) {
+          halt('Antwortcontainer ohne Abschluss', 'Die neue Turn-Key-Struktur ist sichtbar, aber noch kein endgültiger Antwortinhalt oder Abschluss-Button. Kein weiterer Versand.');
+        }
+        return;
+      }
+    }
     const continuation = continueButton();
     if (continuation) {
       if (paused || !ui.autoContinue.checked || mode === 'diagnose') {
