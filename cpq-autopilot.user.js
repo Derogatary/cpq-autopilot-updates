@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CPQ Auto — Projekt-Autopilot
 // @namespace    local.chatgpt.promptqueue
-// @version      3.2.16
-// @description  V3.2.16: Makro- und Projekt-Prompts für Auto-Weiter auswählbar.
+// @version      3.2.17
+// @description  V3.2.17: Chat-Aktivitaet entprellen und roten Fehlerstatus quittieren.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-idle
@@ -16,7 +16,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.16-macro-micro-presets';
+  const VERSION = '3.2.17-halt-recovery';
   if (document.querySelector('#cpq-v3-host')) return;
 
   const KEY = 'chatgpt-prompt-queue:v3.1auto';
@@ -169,7 +169,7 @@
     </style>
     <button id="launch" class="launch" type="button" data-state="idle" title="CPQ öffnen">CPQ</button>
     <section class="panel" id="panel" aria-label="ChatGPT Prompt Queue">
-      <header><strong>CPQ Auto 3.2.16</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="checkUpdates" class="header-update-check" type="button" title="Nur die veröffentlichte Versionsnummer abfragen; keine automatische Installation.">↻ Update prüfen</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
+      <header><strong>CPQ Auto 3.2.17</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="checkUpdates" class="header-update-check" type="button" title="Nur die veröffentlichte Versionsnummer abfragen; keine automatische Installation.">↻ Update prüfen</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
       <section class="update-notice" id="updateNotice" hidden aria-live="polite"><p id="updateInfo"></p><button id="installUpdate" type="button" hidden>Update installieren</button></section>
       <section class="preflight" id="preflight" hidden aria-label="Bestätigung der Automatik">
         <strong>Vor automatischer Ausführung bestätigen</strong>
@@ -1179,6 +1179,33 @@
     if (r) { r.name=ui.projectLabel.value.trim().slice(0,80); r.updated=Date.now(); try{localStorage.setItem(ledgerKey(),JSON.stringify(r));}catch(_){} }
     if(!ui.projectList.hidden)renderProjects();
   });
+  // Reiner Fehlerstatus darf ohne Loeschen von Checkpoints quittiert werden.
+  // Pending-Delivery und laufende Sendungen werden dabei NICHT entsperrt.
+  const acknowledgeHalt = document.createElement('button');
+  acknowledgeHalt.type = 'button';
+  acknowledgeHalt.id = 'cpqAcknowledgeHalt';
+  acknowledgeHalt.textContent = 'Rot quittieren';
+  acknowledgeHalt.title = 'Nur Fehleranzeige zuruecksetzen; ungeklaerte Sendungen bleiben gesperrt';
+  ui.discardRun.parentElement.insertBefore(acknowledgeHalt, ui.discardRun);
+  acknowledgeHalt.addEventListener('click', () => {
+    if (running || awaitingRunApproval || exclusiveLockPending || unresolvedPreviousDelivery() || outstandingDelivery || sendingInProgress || current) {
+      logStatus('Quittierung nicht moeglich', 'Noch aktiver Lauf oder ungeklärter Versand: zuerst den letzten Versand im Chat prüfen.');
+      return;
+    }
+    const old = readLedger();
+    if (old && old.status === 'halted' && !old.pending) {
+      const fresh = {...old, status:'stopped', phase:'idle', lastState:'Fehler quittiert', updated:Date.now()};
+      try { localStorage.setItem(ledgerKey(), JSON.stringify(fresh)); }
+      catch (_) { logStatus('Speicherfehler','Quittierung konnte nicht gespeichert werden.'); return; }
+    }
+    phase = 'idle';
+    paused = false;
+    message = 'Fehler quittiert';
+    explanation = 'Chatdaten und gespeicherter Laufstand bleiben erhalten. Neuer Start erfordert weiterhin die normale Freigabe.';
+    render();
+    reportBadge();
+    updateRecoveryUI();
+  });
   ui.discardRun.addEventListener('click',()=>{
     if(running)return;
     const unconfirmed = unresolvedPreviousDelivery();
@@ -1400,7 +1427,10 @@
     const ended = /(?:Fertig|abgeschlossen|Limit erreicht|Checkpoint erreicht|Prüfung erforderlich|Freigabe benötigt)/i.test(message);
     const record=!running ? readLedger() : null;
     const savedDone=!!record && /(?:Fertig|abgeschlossen|Limit erreicht|Checkpoint erreicht|Prüfung erforderlich|Freigabe benötigt)/i.test(record.lastState || '');
-    const state=running ? (paused?'pause':'run') : ended || savedDone ? 'done' : (phase==='halted' || record?.pending || record?.status==='halted') ? 'halt' : 'idle';
+    // Ein aktueller roter Halt darf nicht durch einen frueheren DONE-Titel
+    // ueberlagert werden; ein alter roter Zustand darf nach Quittierung nicht kleben.
+    const isHalted = phase==='halted' || !!record?.pending || record?.status==='halted';
+    const state=running ? (paused?'pause':'run') : isHalted ? 'halt' : ended || savedDone ? 'done' : 'idle';
     const count=running ? (['project','continue-only'].includes(mode) ? approvedBatchCount() : completed)
       : (record ? (['project','continue-only'].includes(record.mode) ? record.projectCount-(record.runStrategy==='marker' ? (record.batchBaseCount || 0) : 0) : record.completed) : 0);
     const total=running ? (['project','continue-only'].includes(mode) ? Number(ui.maxProject.value) : queue.length)
@@ -1422,6 +1452,8 @@
       : mode === 'project'
       ? `${completed} Antworten · ${approvedBatchCount()} / ${ui.maxProject.value} in diesem Paket (gesamt ${projectCount})${current ? ` · natives Weiter ${current.continueClicks}×` : ''}`
       : `${completed} / ${queue.length} Prompts abgeschlossen${current ? ` · Weiter-Klicks ${current.continueClicks}` : ''}`;
+    const acknowledge = ui.panel.querySelector('#cpqAcknowledgeHalt');
+    if (acknowledge) acknowledge.disabled = running || awaitingRunApproval || exclusiveLockPending || unresolvedPreviousDelivery() || outstandingDelivery || sendingInProgress || !!current;
     ui.start.disabled = running || exclusiveLockPending || !storageReady || configLoading ||
       (configRoute !== null && configRoute !== exactChatRoute()) || (AUTOMATED.has(ui.mode.value) && !approvedHere());
     ui.quickStart.disabled = ui.start.disabled;
@@ -1924,10 +1956,22 @@
     if (warning) { halt('ChatGPT meldet einen Fehler', warning); return; }
     const coldStart = completed === 0 && projectCount === 0 && lastSentAt === 0;
     if (!hasLatestAssistantReply() && !coldStart && !m.allowWithoutTurn) return;
-    if (userNodes().length !== m.userCount) {
-      halt('Andere User-Nachricht erkannt', 'Unerwartete Chat-Aktivität. Bitte den Lauf erneut freigeben.');
+    // DOM-Neudarstellungen koennen die gezaehlten User-Turns kurzzeitig aendern.
+    // Eine neue echte Nachricht bleibt ein Stoppgrund; niemals automatisch
+    // die neue Anzahl als bestaetigt uebernehmen.
+    const observedUserCount = userNodes().length;
+    if (observedUserCount !== m.userCount) {
+      if (m.changedUserCount !== observedUserCount) {
+        m.changedUserCount = observedUserCount;
+        m.changedUserCountAt = now;
+      }
+      if (now - m.changedUserCountAt >= 3500) {
+        halt('Andere User-Nachricht erkannt', 'Die Anzahl der User-Nachrichten hat sich dauerhaft veraendert. Lauf erneut freigeben.');
+      }
       return;
     }
+    m.changedUserCount = null;
+    m.changedUserCountAt = 0;
     const busy = generating() || toolActivity().active;
     if (m.pending) {
       if (busy || m.lastActivityAt > m.clickedAt) {
