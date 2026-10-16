@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CPQ Auto — Projekt-Autopilot
 // @namespace    local.chatgpt.promptqueue
-// @version      3.2.19
-// @description  V3.2.19: Chat-Aktivitaet entprellen und roten Fehlerstatus quittieren.
+// @version      3.2.20
+// @description  V3.2.20: Antwortzuordnungs-Fallback mit anonymisierter Diagnose (correlationProbe).
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-idle
@@ -16,7 +16,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.19-keyed-turn-pairing';
+  const VERSION = '3.2.20';
   if (document.querySelector('#cpq-v3-host')) return;
 
   const KEY = 'chatgpt-prompt-queue:v3.1auto';
@@ -1324,6 +1324,28 @@
       documentLegacyTurns: document.querySelectorAll('[data-message-author-role], [data-testid^="conversation-turn"]').length,
       documentArticles: document.querySelectorAll('article').length
     };
+    // Capture why a completed answer was not attributed, without exposing
+    // the prompt, message body, identifiers or DOM fragments.
+    const c = current;
+    const lastUserNode = t.filter(x => x.role === 'user').at(-1)?.node || null;
+    const lastAssistantTurn = t.at(-1);
+    const lastAssistantNode = lastAssistantTurn?.role === 'assistant' ? lastAssistantTurn.node : null;
+    const cleaned = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const lastUserText = cleaned(lastUserNode?.innerText || lastUserNode?.textContent);
+    const lastAssistantText = cleaned(lastAssistantNode?.innerText || lastAssistantNode?.textContent);
+    const lastShell = lastAssistantNode?.closest?.('[data-turn-key]') || lastAssistantNode;
+    const correlationProbe = c ? {
+      beforeUser:c.beforeUser, beforeAssistant:c.beforeAssistant,
+      currentUser:t.filter(x => x.role === 'user').length,
+      currentAssistant:t.filter(x => x.role === 'assistant').length,
+      userNodeChanged:!!lastUserNode && lastUserNode !== c.beforeUserNode,
+      assistantNodeChanged:!!lastAssistantNode && lastAssistantNode !== c.beforeAssistantNode,
+      sentPromptMatches:!!c.sentPrompt && lastUserText === cleaned(c.sentPrompt),
+      assistantContentChanged:!!lastAssistantText && lastAssistantText !== cleaned(c.beforeAssistantText),
+      assistantHasCompletionAction:!!lastShell?.querySelector('button[data-testid="copy-turn-action-button"], .turn-action-controls button'),
+      sawBusy:!!c.sawBusy, busyEnded:!!c.sawBusyEndAt,
+      sawAssistant:!!c.sawAssistant
+    } : null;
     const data = {
       tool: 'CPQ Auto', version: VERSION, capturedAt: new Date().toISOString(),
       chatScope: exactChatRoute() ? 'Chat-Route erkannt (ID nicht enthalten)' : 'keine Chat-Route',
@@ -1331,6 +1353,7 @@
       run: {mode, running, paused, phase, completed, projectCount, batchCount:approvedBatchCount(), runStrategy:ui.runStrategy.value, durationHours:Number(ui.durationHours.value), replyTimeoutMinutes:Number(ui.replyTimeoutMinutes.value), deadlineReached:runTimedOut(), lastState: message},
       controls: {editorType, editorHasDraft: !!editor && !editorEmpty(editor), editorDetectedChars:editorDiagnostic().chars, composerFound:!!editor, sendButton: !sb ? 'fehlt' : usable(sb) ? 'bereit' : 'deaktiviert', generating: generating(), toolBusy: toolActivity().active, toolSignal: toolActivity().source, nativeContinue: !!continueButton(), webLocksAvailable: !!navigator.locks?.request, exclusiveLockHeld: !!exclusiveLockRelease},
       recognition: {assistantTurns: t.filter(x=>x.role==='assistant').length, userTurns: t.filter(x=>x.role==='user').length, lastSignal: t.at(-1)?.signal || 'keins', lastRole: t.at(-1)?.role || 'keine', rootKind, turnCandidateCount, domProbe},
+      correlationProbe,
       identityCheck: {status:idCheck.status,inspected:idCheck.inspected,identified:idCheck.identified,sources:idCheck.sources,resumeFingerprintAvailable:!!idCheck.fingerprint},
       delivery: {sendStage, sendingInProgress, lastAckSignal, editorClearedOnlyObserved, awaitingAnswer: !!current, toolSeenInAnswer: !!current?.toolWasActive, toolWaitSeconds: current?.toolFirstSeenAt ? Math.round((Date.now()-current.toolFirstSeenAt)/1000) : 0, ackBackgroundPending, ackBackgroundDeferrals},
       background: {visibility:lifecycleState, windowUnfocused:windowAway, schedulerGapMs:lastSchedulerGapMs, wakeGraceActive:Date.now()<wakeGraceUntil, frozenDuringRun, domWakeups},
@@ -1632,8 +1655,11 @@
       const projectButton = mode === 'project' && ui.projectClick.checked ? projectChoiceButton() : null;
       const beforeAssistant = assistantNodes().length;
       const beforeAssistantNode = lastAssistant();
+      // Capture the previous reply content before a keyed container is reused.
+      const beforeAssistantText = (beforeAssistantNode?.innerText || beforeAssistantNode?.textContent || '').trim();
       const beforeUser = userNodes().length;
       const beforeUserNode = userNodes().at(-1) || null;
+      const beforeUserText = (beforeUserNode?.innerText || beforeUserNode?.textContent || '').replace(/\s+/g, ' ').trim();
       const adopting = !projectButton && approvedDraft();
       if (!projectButton && !adopting && !editorEmpty(editor)) {
         const check=getEditor();
@@ -1779,7 +1805,7 @@
       const busyNow = generating();
       const ackSawGeneration = lastAckSignal === 'generation_started';
       current = {
-        beforeAssistant, beforeUser, beforeAssistantNode, beforeUserNode, sentPrompt: prompt, sendAt: sent,
+        beforeAssistant, beforeUser, beforeAssistantNode, beforeAssistantText, beforeUserNode, beforeUserText, sentPrompt: prompt, sendAt: sent,
         sawBusy: ackSawGeneration || busyNow, sawAssistant: false, sawUser: userNodes().length > beforeUser,
         sawBusyEndAt: ackSawGeneration && !busyNow ? Date.now() : 0, lastAssistantActivityAt: sent,
         lastProgressAt: sent, firstAnswerAt: 0, continueClicks: 0,
@@ -1829,7 +1855,9 @@
         === normalizeTurnText(c.sentPrompt);
     const userTurnReplaced = !!lastRenderedUser && !!c.beforeUserNode
       && lastRenderedUser !== c.beforeUserNode && samePendingPrompt;
-    const userTurnConfirmed = userCount > c.beforeUser || userTurnReplaced;
+    const userTurnContentChanged = samePendingPrompt && !!c.beforeUserNode
+      && normalizeTurnText(c.beforeUserText) !== normalizeTurnText(c.sentPrompt);
+    const userTurnConfirmed = userCount > c.beforeUser || userTurnReplaced || userTurnContentChanged;
     const replacedAssistant = userTurnConfirmed
       && !!lastRenderedAssistant && !!c.beforeAssistantNode
       && lastRenderedAssistant !== c.beforeAssistantNode
@@ -1837,7 +1865,19 @@
       && !!(lastRenderedAssistant.closest('[data-turn-key]') || lastRenderedAssistant).querySelector(
         'button[data-testid="copy-turn-action-button"], .turn-action-controls button'
       );
-    const newAssistant = assistantCount > c.beforeAssistant || replacedAssistant;
+    // ChatGPT can reuse the same DOM nodes and counts after send.
+    // A matched new user bubble, changed non-empty assistant content and a
+    // confirmed generation cycle provide independent evidence. The existing
+    // busy/quiet and editor guards below still gate actual continuation.
+    const assistantTextNow = (lastRenderedAssistant?.innerText || lastRenderedAssistant?.textContent || '').trim();
+    const assistantContentChanged = !!assistantTextNow && assistantTextNow !== (c.beforeAssistantText || '');
+    const reusedTurnAnswer = samePendingPrompt && userTurnConfirmed
+      && !!lastRenderedAssistant && lastRenderedTurn.signal === 'conversation-role'
+      && assistantContentChanged && !!c.sawBusy && !!c.sawBusyEndAt
+      && !!(lastRenderedAssistant.closest('[data-turn-key]') || lastRenderedAssistant).querySelector(
+        'button[data-testid="copy-turn-action-button"], .turn-action-controls button'
+      );
+    const newAssistant = assistantCount > c.beforeAssistant || replacedAssistant || reusedTurnAnswer;
     const newUser = userTurnConfirmed;
     // Nach langem Background-Stillstand kann die Antwort inzwischen fertig sein.
     // Zuerst den aktuellen DOM-Zustand pruefen; abgelaufene Wall-Clock allein
@@ -1920,8 +1960,30 @@
       if (c.sawBusy && c.sawBusyEndAt && !busy && !continueButton()) {
         const required = Number(ui.stability.value) * 1000;
         if (now - c.sawBusyEndAt >= required) {
+          // Rescue only when a completed assistant message is visibly paired
+          // with the exact pending user prompt. Never trust Stop-cycle alone.
+          const last = getTurns().at(-1);
+          const lastUser = userNodes().at(-1);
+          const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+          const paired = !!lastUser && !!c.sentPrompt
+            && normalize(lastUser.innerText || lastUser.textContent) === normalize(c.sentPrompt);
+          const shell = last?.node?.closest?.('[data-turn-key]') || last?.node;
+          const complete = last?.role === 'assistant'
+            && last.signal === 'conversation-role'
+            && !!shell?.querySelector('button[data-testid="copy-turn-action-button"], .turn-action-controls button');
+          const changed = !!last?.node && !!(last.node.innerText || last.node.textContent || '').trim()
+            && (last.node.innerText || last.node.textContent || '').trim() !== (c.beforeAssistantText || '');
+          if (paired && complete && changed && getEditor() && editorEmpty(getEditor())) {
+            c.sawAssistant = true;
+            c.firstAnswerAt = c.sawBusyEndAt;
+            c.lastAssistantActivityAt = c.sawBusyEndAt;
+            phase = 'settling';
+            traceEvent('answer_rescued_by_paired_completed_turn');
+            logStatus('Antwort zugeordnet', 'Vollständiger Assistant-Turn nach bestätigter Generierung dem gesendeten Prompt zugeordnet.');
+            return;
+          }
           halt('Antwort nicht zuordenbar',
-            'Generierung endete, aber kein neuer Assistant-Turn wurde erkannt. Chat prüfen; kein weiterer Prompt und kein erneuter Sendeklick. Bitte Diagnose mit domProbe senden.');
+            'Generierung endete, aber kein sicher zuordenbarer Assistant-Turn erkannt. Kein weiterer Prompt; bitte Diagnose mit domProbe senden.');
         }
         return;
       }
