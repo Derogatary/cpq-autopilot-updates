@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CPQ Auto — Projekt-Autopilot
 // @namespace    local.chatgpt.promptqueue
-// @version      3.2.17
-// @description  V3.2.17: Chat-Aktivitaet entprellen und roten Fehlerstatus quittieren.
+// @version      3.2.18
+// @description  V3.2.18: Chat-Aktivitaet entprellen und roten Fehlerstatus quittieren.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-idle
@@ -16,7 +16,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.17-halt-recovery';
+  const VERSION = '3.2.18-halt-recovery';
   if (document.querySelector('#cpq-v3-host')) return;
 
   const KEY = 'chatgpt-prompt-queue:v3.1auto';
@@ -169,7 +169,7 @@
     </style>
     <button id="launch" class="launch" type="button" data-state="idle" title="CPQ öffnen">CPQ</button>
     <section class="panel" id="panel" aria-label="ChatGPT Prompt Queue">
-      <header><strong>CPQ Auto 3.2.17</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="checkUpdates" class="header-update-check" type="button" title="Nur die veröffentlichte Versionsnummer abfragen; keine automatische Installation.">↻ Update prüfen</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
+      <header><strong>CPQ Auto 3.2.18</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="checkUpdates" class="header-update-check" type="button" title="Nur die veröffentlichte Versionsnummer abfragen; keine automatische Installation.">↻ Update prüfen</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
       <section class="update-notice" id="updateNotice" hidden aria-live="polite"><p id="updateInfo"></p><button id="installUpdate" type="button" hidden>Update installieren</button></section>
       <section class="preflight" id="preflight" hidden aria-label="Bestätigung der Automatik">
         <strong>Vor automatischer Ausführung bestätigen</strong>
@@ -1417,11 +1417,35 @@
     phase = 'idle';
     logStatus(title, detail);
   }
+  // Aus den vorhandenen Stoppgründen eine nachvollziehbare Diagnose ableiten.
+  // Der Code ist rein beschreibend und hebt keine Sendesperre auf.
+  function haltReason(title, detail) {
+    const value = (title + ' ' + detail).toLowerCase();
+    if (/versand ungeklärt|sendeklick|senden nicht bestätigt|weiter nicht bestätigt|vorheriger versand|nicht bestätigten sendeklick/.test(value)) return 'SEND_UNCONFIRMED';
+    if (/andere user-nachricht|chat-aktivität|nachrichten.*verändert/.test(value)) return 'CHAT_CHANGED';
+    if (/zeitlimit|antwortüberwachung abgebrochen|timeout|wartezeit/.test(value)) return 'TIMEOUT';
+    if (/antwort nicht zuordenbar|kennung fehlt|nachrichtenidentität|turn.*nicht erkannt/.test(value)) return 'DOM_UNCERTAIN';
+    if (/prüfung erforderlich|manuelle prüfung|cpq-pruefen|freigabe benötigt/.test(value)) return 'REVIEW_REQUIRED';
+    return 'OTHER';
+  }
+  function haltAction(reason, pending) {
+    if (pending) return 'Letzten Sendeklick im Chat prüfen. Kein automatischer Neustart und keine automatische Quittierung.';
+    switch (reason) {
+      case 'CHAT_CHANGED': return 'Chatverlauf prüfen. Falls nur die Darstellung wechselte: Rot quittieren und den Lauf erneut freigeben.';
+      case 'DOM_UNCERTAIN': return 'ChatGPT-Antwort und Oberfläche kontrollieren, dann gegebenenfalls Rot quittieren und neu starten.';
+      case 'TIMEOUT': return 'Prüfen, ob die Antwort noch läuft. Bei eindeutig beendetem Vorgang Rot quittieren und neu freigeben.';
+      case 'REVIEW_REQUIRED': return 'Offene Entscheidung oder Freigabe prüfen; erst danach neu starten.';
+      case 'SEND_UNCONFIRMED': return 'Letzten Versand im Chat prüfen. Ungeklärten Versand nicht blind erneut auslösen.';
+      default: return 'Fehlerhinweis prüfen; bei sicherem Zustand Rot quittieren und erneut starten.';
+    }
+  }
   function halt(title, detail) {
     releaseExclusiveLock();
     running = false; paused = true;
     phase = 'halted';
-    logStatus(title, detail);
+    const reason = haltReason(title, detail);
+    const pending = outstandingDelivery || !!current || sendingInProgress || unresolvedPreviousDelivery();
+    logStatus(title, '[Stoppursache: ' + reason + '] ' + detail + ' Nächste Aktion: ' + haltAction(reason, pending));
   }
   function launcherState() {
     const ended = /(?:Fertig|abgeschlossen|Limit erreicht|Checkpoint erreicht|Prüfung erforderlich|Freigabe benötigt)/i.test(message);
@@ -1607,6 +1631,7 @@
       if (!prompt) { halt('Fortsetzungstext fehlt', 'Kein leerer Prompt wird versendet.'); return; }
       const projectButton = mode === 'project' && ui.projectClick.checked ? projectChoiceButton() : null;
       const beforeAssistant = assistantNodes().length;
+      const beforeAssistantNode = lastAssistant();
       const beforeUser = userNodes().length;
       const adopting = !projectButton && approvedDraft();
       if (!projectButton && !adopting && !editorEmpty(editor)) {
@@ -1753,7 +1778,7 @@
       const busyNow = generating();
       const ackSawGeneration = lastAckSignal === 'generation_started';
       current = {
-        beforeAssistant, beforeUser, sendAt: sent,
+        beforeAssistant, beforeUser, beforeAssistantNode, sendAt: sent,
         sawBusy: ackSawGeneration || busyNow, sawAssistant: false, sawUser: userNodes().length > beforeUser,
         sawBusyEndAt: ackSawGeneration && !busyNow ? Date.now() : 0, lastAssistantActivityAt: sent,
         lastProgressAt: sent, firstAnswerAt: 0, continueClicks: 0,
@@ -1787,7 +1812,19 @@
     const busy = generatingNow || tool.active;
     const assistantCount = assistantNodes().length;
     const userCount = userNodes().length;
-    const newAssistant = assistantCount > c.beforeAssistant;
+    const lastRenderedTurn = getTurns().at(-1);
+    const lastRenderedAssistant = lastRenderedTurn?.role === 'assistant' ? lastRenderedTurn.node : null;
+    // A keyed UI can replace an assistant node without raising the total
+    // count. Require BOTH a newly observed user turn and an independently
+    // visible completed assistant node; a Stop cycle alone is insufficient.
+    const replacedAssistant = userCount > c.beforeUser
+      && !!lastRenderedAssistant && !!c.beforeAssistantNode
+      && lastRenderedAssistant !== c.beforeAssistantNode
+      && lastRenderedTurn.signal === 'conversation-role'
+      && !!(lastRenderedAssistant.closest('[data-turn-key]') || lastRenderedAssistant).querySelector(
+        'button[data-testid="copy-turn-action-button"], .turn-action-controls button'
+      );
+    const newAssistant = assistantCount > c.beforeAssistant || replacedAssistant;
     const newUser = userCount > c.beforeUser;
     // Nach langem Background-Stillstand kann die Antwort inzwischen fertig sein.
     // Zuerst den aktuellen DOM-Zustand pruefen; abgelaufene Wall-Clock allein
