@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CPQ Auto — Projekt-Autopilot
 // @namespace    local.chatgpt.promptqueue
-// @version      3.2.15
-// @description  V3.2.15: Update-Prüfung oben im CPQ-Panel, weiterhin via Tampermonkey.
+// @version      3.2.16
+// @description  V3.2.16: Makro- und Projekt-Prompts für Auto-Weiter auswählbar.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-idle
@@ -16,7 +16,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.15-update-check';
+  const VERSION = '3.2.16-macro-micro-presets';
   if (document.querySelector('#cpq-v3-host')) return;
 
   const KEY = 'chatgpt-prompt-queue:v3.1auto';
@@ -50,6 +50,26 @@
   const BOOTSTRAP_IDLE_MS = 1800; // Nur nach ausdruecklich bestaetigtem Start
   const DEFAULT_PROJECT_PROMPT = 'Weiter. Bearbeite den naechsten konkret ausfuehrbaren, noch offenen Schritt der bisherigen Aufgabe. Wiederhole nichts Erledigtes. Falls alles abgeschlossen ist, erklaere klar, dass keine Schritte mehr offen sind. Optional: [[CPQ:FERTIG]] als letzte Zeile.';
 
+  // Same prompt runs repeatedly in Auto-Weiter; no repeating finished steps.
+  // ChatGPT must not claim access to other conversations/files it cannot see.
+  const AUTOWEITER_PROTOCOL = ' Nutze die nachweislich vorhandenen Projektinformationen und beschlossenen Entscheidungen. Führe genau den nächsten offenen, konkret ausführbaren Schritt aus; liefere ein überprüfbares Ergebnis statt nur einen neuen Plan. Wiederhole nichts Erledigtes, erfinde keine Quellen, Tests, Dateiänderungen oder Freigaben. Fehlen notwendige Daten oder Entscheidungen, frage gezielt statt zu raten. Keine FINAL-, Veröffentlichungs-, Zahlungs- oder sonstigen externen Freigaben ohne ausdrückliche Zustimmung. Wenn CPQ für diesen Chat aktiv ist: Ende mit genau einer eigenen letzten Zeile [[CPQ:WEITER]] bei weiter ausführbarer Arbeit, [[CPQ:FERTIG]] nur bei vollständig erledigtem freigegebenem Umfang oder [[CPQ:PRUEFEN]] bei nötiger Nutzerentscheidung, Risiko oder Blockade. Keine weiteren Wörter nach dem Marker.';
+  // These templates are published in the public userscript. Do NOT add
+  // private user-project names, story bibles, unpublished plans or chats here.
+  // Personalized versions are kept in the PRIVATE repo for deliberate import.
+  const BUILTIN_CONTINUATION_PRESETS = [
+    {id:'macro:portfolio',group:'Makro – Projektsteuerung',name:'Makro · Projektportfolio',text:'Steuere nur die Projekte, die in diesem Chat ausdrücklich zur automatischen Bearbeitung freigegeben und mit ihrem aktuellen Stand verfügbar sind. Arbeite von der Gesamtübersicht zu Abhängigkeiten und Prioritäten. Aktualisiere nur belegbare Fortschritte, wähle die wichtigste nächste offene Etappe und setze davon einen ausführbaren Teil direkt um. Wechsle nicht stillschweigend zu anderen Chats oder nicht freigegebenen Projekten. Bei fehlenden Projektständen oder Berechtigungen gezielt nachfragen.'},
+    {id:'macro:roadmap',group:'Makro – Projektsteuerung',name:'Makro · Roadmap eines Projekts',text:'Arbeite auf Makroebene ausschließlich im aktuellen Projekt. Prüfe Ziel, Produktreife, Abhängigkeiten, offene Etappen, Qualität und dokumentierte Entscheidungen. Leite den nächsten sinnvollen Meilenstein ab und bearbeite den nächsten dazugehörigen ausführbaren Schritt direkt. Keine bereits erledigte Planung neu erzeugen; keine Phasenwechsel, Kurswechsel oder Freigaben ohne belegten Anlass.'},
+    {id:'micro:generic',group:'Mikro – Einzelprojekte',name:'Mikro · Universeller nächster Schritt',text:'Bleibe ausschließlich im aktuellen Projekt und der zuletzt freigegebenen Phase. Nutze den bestehenden Projektstand, bearbeite den nächsten noch offenen konkret ausführbaren Arbeitsschritt vollständig und prüfe das Ergebnis. Vermeide neue Grundsatzdiskussionen, Wiederholungen und unnötige Rückfragen. Entscheide kleinere umkehrbare Details fachgerecht; stoppe bei nicht delegierten Entscheidungen.'},
+    {id:'micro:nonfiction',group:'Mikro – Einzelprojekte',name:'Mikro · Sachbuch / Ratgeber',text:'Arbeite am nächsten offenen Schritt eines Sachbuch- oder Ratgeberprojekts anhand beschlossener Gliederung, Quellen und Sprache. Prüfe Sachlichkeit, Quellenbelege, Konsistenz, Verständlichkeit sowie Text- und visuelles Gesamtkonzept. Setze eine konkrete noch ausstehende Kapitel-, Satz- oder Qualitätsaufgabe um. Keine unbelegten Forschungsbehauptungen, kein eigenmächtiges Freigeben der Druck- oder Veröffentlichungsfassung.'},
+    {id:'micro:fantasy',group:'Mikro – Einzelprojekte',name:'Mikro · Fantasy- und LitRPG-Roman',text:'Arbeite an der nächsten geplanten Szene oder Revision eines Fantasy-/LitRPG-Romans. Prüfe vorhandene Story Bible, Beats, Weltregeln, Progression, Ton, Figurenmotive und Kontinuität. Führe einen konkret offenen Schreib- oder Prüfauftrag aus, statt erneut die Gesamtidee zu diskutieren. Neue Weltdetails nur nach Abgleich mit bereits festgelegten Regeln.'},
+    {id:'micro:fiction',group:'Mikro – Einzelprojekte',name:'Mikro · Roman und Buchproduktion',text:'Setze den nächsten offen gebliebenen Schreib-, Revisions- oder Buchproduktionsschritt eines Romans um. Orientiere dich an Figurenbogen, Szenenlogik, Zielgenre, bestehendem Manuskript, Stilvorgaben und Produktionsentscheidungen. Liefere konkrete Fortschritte, dokumentiere Kontinuitätsprobleme und markiere nur wirklich vorliegende Dateien oder Arbeiten als fertig. Keine Veröffentlichung ohne Freigabe.'},
+    {id:'micro:game',group:'Mikro – Einzelprojekte',name:'Mikro · Game Development',text:'Bearbeite den nächsten offenen Programmier-, Test- oder Balancing-Schritt des aktuellen Games. Halte festgelegte Spiellogik, Progression und Economy-Regeln ein. Priorisiere reproduzierbare Bugs, Sicherheit, Schutz vor Missbrauch und Nutzbarkeit vor optionalen Features. Prüfe verfügbare Tests und berichte klar, was tatsächlich geändert und ausgeführt wurde. Kein produktives Deployment ohne Freigabe.'},
+    {id:'micro:children',group:'Mikro – Einzelprojekte',name:'Mikro · Kinderbuch / Lernmaterial',text:'Arbeite am nächsten freigegebenen Inhalt oder Qualitätsschritt eines Kinderbuchs, Lernhefts oder einer Lern-App. Halte bestehende Figurenreferenzen, Zielalter, gestalterische Einheitlichkeit, eine kindgerechte Sprache und eine klare Lernabsicht ein. Entwickle konkrete ausdruckbare Aufgaben, Geschichten oder umsetzbare Materialien. Behaupte keine fertige Illustration oder Druckdatei, wenn sie nicht vorliegt.'},
+    {id:'micro:site',group:'Mikro – Einzelprojekte',name:'Mikro · Website / Portfolio',text:'Setze den nächsten offenen Umsetzungsschritt der aktuellen Website oder des Portfolios um. Beachte vorhandene Architektur, Darstellung, Interaktion und geplante Inhalte. Prüfe Nutzbarkeit auf Mobilgeräten, Barrierefreiheit, Navigation und Performance. Vermeide eine neue Grundarchitektur ohne Anlass. Kein Domainwechsel und kein Live-Deployment ohne Freigabe.'},
+    {id:'micro:automation',group:'Mikro – Einzelprojekte',name:'Mikro · KI-Agenten / Automatisierung',text:'Arbeite den nächsten konkret machbaren Schritt eines KI-Agenten-, Workflow- oder Lernprojekts aus. Beachte Datenschutz, sichere Automatisierung, Aufwand, Kosten und reproduzierbare Tests. Liefere eine ausführbare Konfiguration oder eine eindeutig als Übung gekennzeichnete Lösung. Keine externen Kundenzusagen, Käufe oder Bereitstellungen ohne Freigabe.'},
+    {id:'micro:software',group:'Mikro – Einzelprojekte',name:'Mikro · Software / GitHub-Projekt',text:'Bearbeite den nächsten offenen Entwicklungsschritt im bestehenden Repository. Arbeite nach freigegebenem Branch-/Test-/Review-Prozess, halte Änderungen klein und prüfe die wichtigsten Regressionen. Erhalte Sicherheitsprüfungen, Berechtigungsgrenzen und Nutzerfreigaben. Trenne geplante Arbeit von wirklich ausgeführten Commits, Builds, Pull Requests und Tests. Keine ungeprüfte Veröffentlichung.'}
+  ].map(p=>({...p,text:p.text+AUTOWEITER_PROTOCOL}));
+
   const EXAMPLES = {
     custom: '',
     book: [
@@ -67,7 +87,7 @@
     single: 'Analysiere die aktuelle Aufgabe systematisch. Nenne Annahmen, löse die Kernfrage und liefere überprüfbare nächste Schritte.'
   };
 
-  const safeSettings = { mode: 'review', waitSeconds: 12, autoContinue: true, maxContinue: 2, maxProject: 5, projectClick: false, projectPrompt: DEFAULT_PROJECT_PROMPT, fallbackMissingMarker: true, fallbackContinueText: true, loopGuard:true, checkpointEvery:0, runStrategy:'count', durationHours:0, replyTimeoutMinutes:60 };
+  const safeSettings = { mode: 'review', waitSeconds: 12, autoContinue: true, maxContinue: 2, maxProject: 5, projectClick: false, projectPrompt: BUILTIN_CONTINUATION_PRESETS.find(p=>p.id==='micro:generic').text, fallbackMissingMarker: true, fallbackContinueText: true, loopGuard:true, checkpointEvery:0, runStrategy:'count', durationHours:0, replyTimeoutMinutes:60 };
   let initial = { text: '', ...safeSettings };
   try {
     const saved = typeof GM_getValue === 'function' ? GM_getValue(KEY, '') : '';
@@ -149,7 +169,7 @@
     </style>
     <button id="launch" class="launch" type="button" data-state="idle" title="CPQ öffnen">CPQ</button>
     <section class="panel" id="panel" aria-label="ChatGPT Prompt Queue">
-      <header><strong>CPQ Auto 3.2.15</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="checkUpdates" class="header-update-check" type="button" title="Nur die veröffentlichte Versionsnummer abfragen; keine automatische Installation.">↻ Update prüfen</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
+      <header><strong>CPQ Auto 3.2.16</strong><div class="header-actions"><button id="quickStart" class="header-quick-start" type="button" title="Letzte Einstellungen für diesen Chat übernehmen. Die Startbestätigung bleibt erforderlich.">Schnellstart</button><button id="checkUpdates" class="header-update-check" type="button" title="Nur die veröffentlichte Versionsnummer abfragen; keine automatische Installation.">↻ Update prüfen</button><button id="close" class="close" type="button" aria-label="Fenster minimieren">×</button></div></header>
       <section class="update-notice" id="updateNotice" hidden aria-live="polite"><p id="updateInfo"></p><button id="installUpdate" type="button" hidden>Update installieren</button></section>
       <section class="preflight" id="preflight" hidden aria-label="Bestätigung der Automatik">
         <strong>Vor automatischer Ausführung bestätigen</strong>
@@ -191,13 +211,14 @@
         <label for="projectPrompt">Fortsetzungsnachricht (auch ohne Button/Marker)</label>
         <textarea id="projectPrompt" spellcheck="true" style="min-height:80px"></textarea>
         <div class="scope" aria-label="Lokaler Fortsetzungsprompt-Speicher">
-          <strong>Gespeicherte Fortsetzungsprompts · nur lokal</strong>
-          <label for="promptPresetSelect">Gespeicherten Prompt wählen</label>
+          <strong>Auto-Weiter: Makro- und Projektvorlagen</strong>
+          <p class="scope-small">Mitgelieferte Vorlagen oder eigene lokal gespeicherte Fortsetzungstexte. Auswahl allein sendet nichts.</p>
+          <label for="promptPresetSelect">Vorlage oder gespeicherten Prompt wählen</label>
           <select id="promptPresetSelect"><option value="">– Bitte auswählen –</option></select>
           <label for="promptPresetName">Name des Prompts</label>
           <input id="promptPresetName" maxlength="60" placeholder="z. B. Ratgeber – nächster Schritt" autocomplete="off" style="width:100%;padding:7px;border:1px solid #5c6c82;border-radius:7px;background:#263247;color:#fff"/>
           <div class="buttons"><button id="promptPresetLoad" type="button">Übernehmen</button><button id="promptPresetSave" type="button">Speichern</button><button id="promptPresetDelete" type="button">Löschen</button></div>
-          <p id="promptPresetStatus" class="scope-small" aria-live="polite">Bis zu 30 benannte Texte. Kein automatischer Versand.</p>
+          <p id="promptPresetStatus" class="scope-small" aria-live="polite">Vorlagen bleiben unverändert; bis zu 30 eigene Texte lokal speichern.</p>
         </div>
         <label class="checkbox"><input id="fallbackMissingMarker" type="checkbox"/> Projektmodus: Bei fehlendem CPQ-Marker automatisch fortsetzen (bis zum Limit)</label>
         <label class="checkbox"><input id="projectClick" type="checkbox"/> Experimentell: echten „Weiter · CPQ“-Button anklicken, falls vorhanden (sonst Nachricht senden)</label>
@@ -495,7 +516,7 @@
   }
   let latestReleaseVersion = null;
   let updateCheckPending = false;
-  const installedVersion = '3.2.15';
+  const installedVersion = '3.2.16';
   function updateNotice(message, available=false) {
     ui.updateNotice.hidden = false;
     ui.updateInfo.textContent = message;
@@ -2039,12 +2060,28 @@
     }).slice(0,MAX_PROMPT_PRESETS).map(({id,name,text})=>({id,name,text}));
   }
   function presetMessage(message) { ui.promptPresetStatus.textContent = message; }
+  function selectedContinuationPreset() {
+    const id = ui.promptPresetSelect.value;
+    return BUILTIN_CONTINUATION_PRESETS.find(p=>p.id===id) || promptPresets.find(p=>p.id===id) || null;
+  }
   function renderPromptLibrary(selected='') {
     const active=selected || ui.promptPresetSelect.value;
     ui.promptPresetSelect.replaceChildren(new Option('– Bitte auswählen –',''));
-    for (const entry of promptPresets) ui.promptPresetSelect.add(new Option(entry.name,entry.id));
-    if (promptPresets.some(x=>x.id===active)) ui.promptPresetSelect.value=active;
-    presetMessage(promptPresets.length+'/'+MAX_PROMPT_PRESETS+' benannte Prompts lokal gespeichert. Auswahl startet nichts.');
+    for (const groupName of ['Makro – Projektsteuerung','Mikro – Einzelprojekte']) {
+      const group=document.createElement('optgroup');
+      group.label=groupName;
+      for (const entry of BUILTIN_CONTINUATION_PRESETS.filter(p=>p.group===groupName))
+        group.append(new Option(entry.name,entry.id));
+      ui.promptPresetSelect.append(group);
+    }
+    if (promptPresets.length) {
+      const own=document.createElement('optgroup');
+      own.label='Meine lokal gespeicherten Prompts';
+      for (const entry of promptPresets) own.append(new Option(entry.name,entry.id));
+      ui.promptPresetSelect.append(own);
+    }
+    if ([...BUILTIN_CONTINUATION_PRESETS,...promptPresets].some(x=>x.id===active)) ui.promptPresetSelect.value=active;
+    presetMessage(BUILTIN_CONTINUATION_PRESETS.length+' mitgelieferte Vorlagen · '+promptPresets.length+'/'+MAX_PROMPT_PRESETS+' eigene lokal gespeicherte Prompts. Auswahl startet nichts.');
   }
   function loadPromptLibrary() {
     const finish = raw => {
@@ -2084,12 +2121,12 @@
     return true;
   }
   ui.promptPresetSelect.addEventListener('change',()=>{
-    const selected=promptPresets.find(x=>x.id===ui.promptPresetSelect.value);
+    const selected=selectedContinuationPreset();
     if (selected) ui.promptPresetName.value=selected.name;
   });
   ui.promptPresetLoad.addEventListener('click',()=>{
     if (!canEditPromptLibrary()) return;
-    const entry=promptPresets.find(x=>x.id===ui.promptPresetSelect.value);
+    const entry=selectedContinuationPreset();
     if (!entry) {presetMessage('Bitte zuerst einen gespeicherten Prompt auswählen.');return;}
     ui.projectPrompt.value=entry.text;
     ui.promptPresetName.value=entry.name;
@@ -2114,7 +2151,7 @@
   ui.promptPresetDelete.addEventListener('click',()=>{
     if (!canEditPromptLibrary()) return;
     const entry=promptPresets.find(x=>x.id===ui.promptPresetSelect.value);
-    if (!entry) {presetMessage('Bitte erst einen gespeicherten Prompt auswählen.');return;}
+    if (!entry) {presetMessage('Nur eigene gespeicherte Prompts können gelöscht werden. Vorlagen bleiben erhalten.');return;}
     if (!window.confirm('Gespeicherten Prompt „'+entry.name+'“ endgültig löschen?')) return;
     storePromptLibrary(promptPresets.filter(x=>x.id!==entry.id),()=>{
       ui.promptPresetName.value='';
